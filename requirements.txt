@@ -1,1 +1,4 @@
 cleverhans==3.0.0.post0
+numpy
+tensorflow==1.15.0
+onnx
