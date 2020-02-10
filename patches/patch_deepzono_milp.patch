@@ -1,0 +1,195 @@
+--- ERAN/tf_verify/deepzono_milp.py	2020-02-10 21:07:19.155479913 +0000
++++ symadex/tf_verify/deepzono_milp.py	2020-02-10 21:27:30.774103508 +0000
+@@ -13,7 +13,10 @@
+     start = len(var_list)
+     for j in range(num_out_neurons):
+         var_name = "x" + str(start+j)
+-        var = model.addVar(vtype=GRB.CONTINUOUS, lb=lbi[j], ub =ubi[j], name=var_name)
++        if len( lbi ) == 0:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=var_name)
++        else:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=lbi[j], ub =ubi[j], name=var_name)
+         var_list.append(var)
+ 
+     for out_x in range(out_shape[1]):
+@@ -69,7 +72,10 @@
+ 
+     for j in range(output_size):
+         var_name = "x" + str(maxpool_counter+j)
+-        var = model.addVar(vtype=GRB.CONTINUOUS, lb = lbi[j], ub=ubi[j],  name=var_name)
++        if len( lbi ) == 0:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY,  name=var_name)
++        else:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb = lbi[j], ub=ubi[j],  name=var_name)
+         var_list.append(var)
+ 
+     output_offset = 0
+@@ -160,7 +166,10 @@
+     # output of matmult
+     for j in range(num_neurons_affine):
+         var_name = "x" + str(start+j)
+-        var = model.addVar(vtype=GRB.CONTINUOUS, lb=lbi[j], ub =ubi[j], name=var_name)
++        if len( lbi ) == 0:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=var_name)
++        else:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=lbi[j], ub =ubi[j], name=var_name)
+         var_list.append(var)
+ 
+     for j in range(num_neurons_affine):
+@@ -183,7 +192,10 @@
+     # output of matmult
+     for j in range(num_neurons_affine):
+         var_name = "x" + str(start + j)
+-        var = model.addVar(vtype=GRB.CONTINUOUS, lb=lbi[j], ub=ubi[j], name=var_name)
++        if len( lbi ) == 0:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=var_name)
++        else:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb=lbi[j], ub=ubi[j], name=var_name)
+         var_list.append(var)
+ 
+     for j in range(num_neurons_affine):
+@@ -200,7 +212,7 @@
+     return start
+ 
+ 
+-def handle_relu(model,var_list,layerno,affine_counter,num_neurons,lbi,ubi, relu_groupsi,use_milp):
++def handle_relu(model,var_list,layerno,affine_counter,num_neurons,lbi,ubi, relu_groupsi, use_milp, use_deeppoly):
+     use_milp = use_milp and config.use_milp
+ 
+     start= len(var_list)
+@@ -218,8 +230,11 @@
+     # relu variables
+     for j in range(num_neurons):
+         var_name = "x" + str(relu_counter+j)
+-        upper_bound = max(0,ubi[j])
+-        var = model.addVar(vtype=GRB.CONTINUOUS, lb = 0.0, ub=upper_bound,  name=var_name)
++        if len( lbi ) == 0:
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb = 0.0, ub=GRB.INFINITY, name=var_name)
++        else:
++            upper_bound = max(0,ubi[j])
++            var = model.addVar(vtype=GRB.CONTINUOUS, lb = 0.0, ub=upper_bound,  name=var_name)
+         var_list.append(var)
+ 
+ 
+@@ -258,22 +273,40 @@
+             elif(lbi[j]>=0):
+                 expr = var_list[relu_counter+j] - var_list[affine_counter+j]
+                 model.addConstr(expr, GRB.EQUAL, 0)
+-        for krelu_inst in relu_groupsi:
+-            for row in krelu_inst.cons:
+-                k = len(krelu_inst.varsid)
+-                expr = LinExpr()
+-                expr.addConstant(row[0])
+-                for i, x in enumerate(krelu_inst.varsid):
+-                    expr.addTerms(row[1+i], var_list[affine_counter+x])
+-                    expr.addTerms(row[1+k+i], var_list[relu_counter+x])
+-                model.addConstr(expr >= 0)
++            elif relu_groupsi is None:
++                if use_deeppoly and not np.abs( ubi[j] ) < np.abs( lbi[j] ):
++                    var_list[relu_counter+j].setAttr( GRB.Attr.LB, lbi[j] )
++                if not use_deeppoly or np.abs( ubi[j] ) >= np.abs( lbi[j] ):
++                    # y >= x
++                    expr = var_list[relu_counter+j] - var_list[affine_counter+j]
++                    model.addConstr(expr, GRB.GREATER_EQUAL, 0)
++                # y <= lambda.x + mu
++                slope = ubi[j]/(ubi[j]-lbi[j])
++                intercept = -slope*lbi[j]
++                expr = var_list[relu_counter+j] - slope*var_list[affine_counter+j]
++                model.addConstr(expr, GRB.LESS_EQUAL, intercept)
++        if not relu_groupsi is None:
++            for krelu_inst in relu_groupsi:
++                for row in krelu_inst.cons:
++                    k = len(krelu_inst.varsid)
++                    expr = LinExpr()
++                    expr.addConstant(row[0])
++                    for i, x in enumerate(krelu_inst.varsid):
++                        expr.addTerms(row[1+i], var_list[affine_counter+x])
++                        expr.addTerms(row[1+k+i], var_list[relu_counter+x])
++                    model.addConstr(expr >= 0)
+ 
++    if use_deeppoly:
++        model.update()
+     return relu_counter
+ 
++def create_model(nn, LB_N0, UB_N0, nlb, nub, relu_groups, numlayer, use_milp, relu_needed, deep_poly_needed=False):
+ 
+-def create_model(nn, LB_N0, UB_N0, nlb, nub, relu_groups, numlayer, use_milp, relu_needed):
+     use_milp = use_milp and config.use_milp
+ 
++    if deep_poly_needed == False:
++        deep_poly_needed = [ 0 ] * len( relu_needed )
++
+     model = Model("milp")
+ 
+     model.setParam("OutputFlag",0)
+@@ -350,15 +383,14 @@
+             biases = nn.biases[nn.ffn_counter+nn.conv_counter]
+             index = nn.predecessors[i+1][0]
+             counter = start_counter[index]
+-            
+             counter = handle_affine(model,var_list,counter,weights,biases,nlb[i],nub[i])
+ 
+ 
+             if(nn.layertypes[i]=='ReLU' and relu_needed[i]):
+                 if(use_milp):
+-                     counter = handle_relu(model,var_list,i,counter,len(weights),nlb[i],nub[i], relu_groups[i], use_milp)
++                     counter = handle_relu(model,var_list,i,counter,len(weights),nlb[i],nub[i], relu_groups[i], use_milp, deep_poly_needed[i])
+                 else:
+-                     counter = handle_relu(model,var_list,i,counter,len(weights),nlb[i],nub[i], relu_groups[i], use_milp)
++                     counter = handle_relu(model,var_list,i,counter,len(weights),nlb[i],nub[i], relu_groups[i], use_milp, deep_poly_needed[i])
+ 
+             start_counter.append(counter)
+             nn.ffn_counter+=1
+@@ -382,9 +414,9 @@
+ 
+             if(relu_needed[i] and nn.layertypes[i]=='Conv2D'):
+                if(use_milp):
+-                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], [], use_milp)
++                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], [], use_milp, deep_poly_needed[i])
+                else:
+-                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], relu_groups[i], use_milp)
++                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], relu_groups[i], use_milp, deep_poly_needed[i])
+ 
+             start_counter.append(counter)
+ 
+@@ -407,9 +439,9 @@
+             counter = handle_residual(model,var_list,counter1,counter2,nlb[i],nub[i])
+             if(relu_needed[i] and nn.layertypes[i]=='Resadd'):
+                if(use_milp):
+-                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], relu_groups[i],use_milp)
++                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], relu_groups[i],use_milp, deep_poly_needed[i])
+                else:
+-                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], relu_groups[i], use_milp)
++                   counter = handle_relu(model,var_list,i,counter,num_neurons,nlb[i],nub[i], relu_groups[i], use_milp, deep_poly_needed[i])
+ 
+             start_counter.append(counter)
+             nn.residual_counter +=1
+@@ -592,6 +624,28 @@
+     input_size = len(LB_N0)
+ 
+     counter, var_list, model = create_model(nn, LB_N0, UB_N0, nlb, nub, relu_groups[i], numlayer, True,relu_needed)
++    
++    '''
++    lbi = np.zeros( len( var_list ) )
++    ubi = np.zeros( len( var_list ) )
++    for i in range( len( var_list ) ):
++        obj = LinExpr()
++        obj += var_list[i]
++
++        model.setObjective(obj,GRB.MINIMIZE)
++        model.optimize()
++        if not model.SolCount==0:
++            lbi[i] = model.objbound
++        else:
++            import pdb; pdb.set_trace()
++        model.setObjective(obj,GRB.MAXIMIZE)
++        model.optimize()
++        if not model.SolCount==0:
++            ubi[i] = model.objbound
++        else:
++            import pdb; pdb.set_trace()
++    '''
++    import pdb; pdb.set_trace()
+ 
+     num_var = len(var_list)
+     output_size = num_var - counter

@@ -1,0 +1,80 @@
+--- ERAN/tf_verify/read_net_file.py	2020-02-10 21:07:19.155479913 +0000
++++ symadex/tf_verify/read_net_file.py	2020-02-10 21:27:30.774103508 +0000
+@@ -74,6 +74,7 @@
+     last_layer = None
+     h,w,c = None, None, None
+     is_conv = False
++    layers = [x]
+     while True:
+         curr_line = net.readline()[:-1]
+         if 'Normalize' in curr_line:
+@@ -113,12 +114,22 @@
+             b = myConst(b)
+             if(curr_line=="Affine"):
+                 x = tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b)
++                layers.append( x )
+             elif(curr_line=="ReLU"):
+-                x = tf.nn.relu(tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b))
++                x = tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b)
++                layers.append( x )
++                x = tf.nn.relu( x )
++                layers.append( x )
+             elif(curr_line=="Sigmoid"):
+-                x = tf.nn.sigmoid(tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b))
++                x = tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b)
++                layers.append( x )
++                x = tf.nn.sigmoid( x )
++                layers.append( x )
+             else:
+-                x = tf.nn.tanh(tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b))
++                x = tf.nn.bias_add(tf.matmul(tf.reshape(x, [1, numel(x)]),W), b)
++                layers.append( x )
++                x = tf.nn.tanh( x )
++                layers.append( x )
+             print("\tOutShape: ", x.shape)
+             print("\tWShape: ", W.shape)
+             print("\tBShape: ", b.shape)
+@@ -141,6 +152,7 @@
+             print("MaxPool", args)
+ 
+             x = tf.nn.max_pool(tf.reshape(x, [1] + args["input_shape"]), padding=padding_arg, strides=stride, ksize=ksize)
++            layers.append( x )
+             print("\tOutShape: ", x.shape)
+         elif curr_line == "Conv2D":
+             is_conv = True
+@@ -185,13 +197,23 @@
+             print("Conv2D", args, "W.shape:",W.shape, "b.shape:", b.shape)
+             print("\tOutShape: ", x.shape)
+             if("ReLU" in line):
+-                x = tf.nn.relu(tf.nn.bias_add(x, b))
++                x = tf.nn.bias_add(x, b)
++                layers.append( x )
++                x = tf.nn.relu( x ) 
++                layers.append( x )
+             elif("Sigmoid" in line):
+-                x = tf.nn.sigmoid(tf.nn.bias_add(x, b))
++                x = tf.nn.bias_add(x, b)
++                layers.append( x )
++                x = tf.nn.sigmoid( x )
++                layers.append( x )
+             elif("Tanh" in line):
+-                x = tf.nn.tanh(tf.nn.bias_add(x, b))
++                x = tf.nn.bias_add(x, b)
++                layers.append( x )
++                x = tf.nn.tanh( x )
++                layers.append( x )
+             elif("Affine" in line):
+                 x = tf.nn.bias_add(x, b)
++                layers.append( x )
+             else:
+                 raise Exception("Unsupported activation: ", curr_line)
+         elif curr_line == "":
+@@ -201,7 +223,7 @@
+         last_layer = curr_line
+ 
+     model = x
+-    return model, is_conv, mean, std
++    return model, is_conv, mean, std, layers
+ 
+ 
+ def read_onnx_net(net_file):
