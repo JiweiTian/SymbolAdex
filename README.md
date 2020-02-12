@@ -6,9 +6,23 @@ git clone https://github.com/dimy93/SymbolAdex.git
 cd SymbolAdex
 ./install.sh 
 ```
-To run the MNIST convSmall experiment call the ***run\_mnist.sh*** script as follows:
+To run the MNIST convSmall experiments call the ***run\_mnist.sh*** script as follows:
 ```
-git clone https://github.com/dimy93/SymbolAdex.git
 cd ERAN/tf_verify/
 ./run_mnist.sh
+```
+To run the CIFAR10 convSmall experiments call the ***run\_cifar10.sh*** script as follows:
+```
+cd ERAN/tf_verify/
+./run_cifar10.sh
+```
+To run the MNIST convBig experiments call the ***run\_mnist\_big.sh*** script as follows:
+```
+cd ERAN/tf_verify/
+./run_mnist_big.sh
+```
+To run the MNIST 9x200 experiments call the ***run\_mnist\_ffn.sh*** script as follows:
+```
+cd ERAN/tf_verify/
+./run_mnist_ffn.sh
 ```
