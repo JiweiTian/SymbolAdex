@@ -4,7 +4,7 @@ To download and install the code for this project execute the following commands
 ```
 git clone https://github.com/dimy93/SymbolAdex.git
 cd SymbolAdex
-./install.sh 
+sudo ./install.sh 
 ```
 To run the MNIST convSmall experiments call the ***run\_mnist.sh*** script as follows:
 ```
@@ -33,5 +33,5 @@ To execute mortgage dataset experiments:
 git clone https://github.com/dimy93/SymbolAdex.git
 cd SymbolAdex
 git checkout mortgage
-./install.sh
+sudo ./install.sh
 ```
