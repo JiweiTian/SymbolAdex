@@ -230,6 +230,7 @@ def pool_func( var_name ):
 
 class CutModel:
     def __init__( self, sess, tf_input, tf_output, y_true, pixel_size, y_tar=None, **kwargs ):
+        self.approx_obox = False
         self.sess = sess
         self.tf_input = tf_input
         self.input_size = tf_input.shape[ 0 ].value
@@ -328,7 +329,7 @@ class CutModel:
         self.y_true = y_true
         self.y_tar = y_tar
 
-        self.tf_out_pos = self.tf_output[ 0, y_tar ] - self.tf_output[ 0, self.y_true ]
+        self.tf_out_pos = self.tf_output[ 0, y_tar ] - self.tf_output[ 0, y_true ]
         self.tf_grad_positive = tf.gradients( self.tf_out_pos, self.tf_input )[ 0 ]
         self.tf_out_neg = self.tf_output[ 0, self.y_true ] - self.tf_output[ 0, y_tar ]
         self.tf_grad_negative = tf.gradients( self.tf_out_neg, self.tf_input )[ 0 ]
@@ -525,25 +526,34 @@ class CutModel:
     def overapprox_box( self ):
         if not self.obox is None:
             return self.obox
-
-        ncpus = os.sysconf("SC_NPROCESSORS_ONLN")
-
-        global global_model
-        global_model = self.model.copy()
-        global_model.setParam(GRB.Param.Threads, 1)
-        global_model.update()
-
+        
         t = time.time()
-        var_names = [ var.VarName for var in self.xs ]
-        with multiprocessing.Pool(ncpus) as pool:
-            solver_result = pool.map( pool_func, var_names )
-        del globals()[ 'global_model' ]
-        lb = np.array( [ 0 ] * self.input_size, dtype=np.float64 )
-        ub = np.array( [ 0 ] * self.input_size, dtype=np.float64 )
-        for i in range( self.input_size ):
-            id = int( var_names[ i ][ 1 : ] )
-            lb[ id ] = solver_result[ i ][ 0 ]
-            ub[ id ] = solver_result[ i ][ 1 ]
+        if self.approx_obox:
+            lb = []
+            ub = []
+            for i in range( self.input_size ):
+                lb.append( self.xs[ i ].LB )
+                ub.append( self.xs[ i ].UB )
+            lb = np.array( lb )
+            ub = np.array( ub )
+        else:
+            ncpus = os.sysconf("SC_NPROCESSORS_ONLN")
+
+            global global_model
+            global_model = self.model.copy()
+            global_model.setParam(GRB.Param.Threads, 1)
+            global_model.update()
+        
+            var_names = [ var.VarName for var in self.xs ]
+            with multiprocessing.Pool(ncpus) as pool:
+                solver_result = pool.map( pool_func, var_names )
+            del globals()[ 'global_model' ]
+            lb = np.array( [ 0 ] * self.input_size, dtype=np.float64 )
+            ub = np.array( [ 0 ] * self.input_size, dtype=np.float64 )
+            for i in range( self.input_size ):
+                id = int( var_names[ i ][ 1 : ] )
+                lb[ id ] = solver_result[ i ][ 0 ]
+                ub[ id ] = solver_result[ i ][ 1 ]
         elapsed_time = time.time() - t
         print( 'Overapprox Time:', elapsed_time, 'secs' )
 
@@ -598,6 +608,27 @@ class CutModel:
         
         self.ubox = ( lb, ub )
         return self.ubox
+
+    def furthest_point( self, x ):
+        x0 = self.get_x0()
+        x - x0 > 0 
+        
+        obj = LinExpr()
+        for i in range( self.input_size ):
+            if x[ i ] > x0[ i ]:
+                obj -= self.xs[ i ]
+            else:
+                obj += self.xs[ i ]
+        self.model.reset()
+        self.model.setObjective(obj,GRB.MAXIMIZE)
+        self.model.optimize()
+        if self.model.SolCount == 0:
+            assert False
+        res = []
+        for i in range( self.input_size ):
+            res.append( self.xs[ i ].x )
+
+        return np.array( res )
 
     def get_x0( self ):
         if not self.x0 is None:
@@ -770,7 +801,7 @@ class CutModel:
         rand_dir = np.random.normal( 0, 1, size=( num_samples_est, self.input_size ) ) 
         rand_dir *= ( ub - lb )
         if x0 is None:
-            x0_new = self.get_x0()
+            x0_new = self.furthest_point( attack )
         
         self.set_precision( attack )
         def accept( x_k ):
@@ -789,7 +820,7 @@ class CutModel:
         rand_dir = np.random.normal( 0, 1, size=( int( num_samples / 10.0 ), self.input_size ) ) 
         rand_dir *= ( ub - lb )
         samples_final = []
-        for coef in np.arange( 0, 1, 0.1 ):
+        for coef in np.arange( 0, 1.1, 0.1 ):
             x_k = pt * coef + attack * ( 1 - coef )
             samples = self.sample_gaussian_around_attack( x_k, rand_dir, prints=False )
             samples = filter( samples )
@@ -1487,7 +1518,7 @@ class CutModel:
         return ts
 
     def shrink_poly( self, nn, ver_type, target ):
-        min_bound = 1.0 / ( 2**10 )
+        min_bound = 1.0 / ( 2**7 )
         eps = min_bound
         sol = None
         print( 'Initial search' )

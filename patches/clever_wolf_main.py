@@ -13,12 +13,14 @@ parser.add_argument('--netname', type=str, default=None, help='the network name,
 parser.add_argument('--domain', type=str, default='DeepPoly',choices=['LP', 'DeepPoly'], help='Domain to use in verification')
 parser.add_argument('--dataset', type=str, default=None, help='the dataset, can be either mnist, cifar10, or acasxu')
 parser.add_argument('--image_number', type=int, default=None, help='Whether to test a specific image.' )
-parser.add_argument('--epsilon', type=float, default=0, help='the epsilon for L_infinity perturbation', required=True, nargs='+')
+parser.add_argument('--epsilon', type=float, default=0, help='the epsilon for L_infinity perturbation' )
 parser.add_argument('--seed', type=int, default=None, help='Random seed for adex generation.' )
 parser.add_argument('--model', type=str, default=None, help='Which model to load, if no model is specified a new one is trained.' )
 parser.add_argument('--choose_criterea_every', type=int, default=10, help='How often to choose wheher to use LP or Wolfe' )
 parser.add_argument('--max_cuts', type=int, default=50, help='Maximum number of cuts before shrinking' )
 parser.add_argument('--save_every', type=int, default=10, help='How often to save model' )
+parser.add_argument('--nowolf', action='store_true', help='Do not use Frank-Wolfe')
+parser.add_argument('--obox_approx', action='store_true', help='Do not calculate full overapprox_box')
 
 args = parser.parse_args()
 
@@ -29,10 +31,6 @@ else:
     seed = None
 netname = args.netname
 epsilon = args.epsilon
-if len( epsilon ) == 1:
-    epsilon = epsilon[ 0 ]
-else:
-    epsilon = np.array( epsilon )
 dataset = args.dataset
 
 filename, file_extension = os.path.splitext(netname)
@@ -468,7 +466,6 @@ def lp_cut( cut_model, hist, nn, domain, y_tar, lp_ver_output=None, complete=Fal
     return False, hyper
 
 def choose_method( cut_model, hist, lp_params, wolf_params ):
-    #return 'LP'
     print( '\nStart choose method\n' )
     output = cut_model.lp_verification( *lp_params )
     
@@ -586,22 +583,26 @@ def clever_wolf( nn, cut_model, y_true, y_tar, specLB, specUB, domain, args ):
         update_target_pool( ( y_true, y_tar ) )                                                                                                                         
         cut_model.update_target( y_true, y_tar )
         cut_model.reset_model( specLB, specUB )
-        samples = cut_model.sample_poly_under( 250 )                                                                                                                   
-        pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
-        print( 'Target', y_tar, data.shape[ 0 ] + pos_ex.shape[ 0 ], '/', 500 )
-        #print( 'Target', y_tar, data.shape[ 0 ], '/', 500 )
-        if data.shape[ 0 ] + pos_ex.shape[ 0 ] > 0:
-        #if data.shape[ 0 ] > 0:
+        succ_attacks = data.shape[ 0 ]
+        all_attacks = 250
+        if not args.nowolf:
+            samples = cut_model.sample_poly_under( 250 )                                                                                                                   
+            pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
+            succ_attacks += pos_ex.shape[ 0 ]
+            all_attacks += 250
+        print( 'Target', y_tar, succ_attacks, '/', all_attacks )
+        if succ_attacks > 0:
             data, lb, ub = generate_initial_region_PGD( y_tar, 5000 )
             reset_pool( ( specLB, specUB ) )
             update_target_pool( ( y_true, y_tar ) )
             cut_model.update_target( y_true, y_tar )
             cut_model.reset_model( specLB, specUB )
-
-            samples = cut_model.sample_poly_under( 5000 )
-            pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
-            if not pos_ex.shape[ 0 ] == 0:
-                data = np.concatenate( ( data, pos_ex ) ) 
+            
+            if not args.nowolf:
+                samples = cut_model.sample_poly_under( 5000 )
+                pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
+                if not pos_ex.shape[ 0 ] == 0:
+                    data = np.concatenate( ( data, pos_ex ) ) 
             lb = np.min( data, axis=0 )
             ub = np.max( data, axis=0 )
 
@@ -629,9 +630,10 @@ def clever_wolf( nn, cut_model, y_true, y_tar, specLB, specUB, domain, args ):
             print( 'Verified, time:', int( time.time() - clever_start_time ) )
             return True   
     print( 'Init model' )
+    if args.obox_approx:
+        cut_model.approx_obox = True
     process = psutil.Process(os.getpid())
-    start_lp_sampling = False
-    #start_lp_sampling = True
+    start_lp_sampling = args.nowolf
     method = None
     res = None
     hist = History( cut_model.input_size, cut_hist_size=5, update_hist_every=2 ) 
