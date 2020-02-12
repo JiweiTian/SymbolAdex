@@ -11,7 +11,7 @@ from sklearn.svm import LinearSVC
 from scipy.optimize import minimize_scalar
 from deepzono_milp import create_model
 from clever_pgd_generator import PGDGenerator
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
 
 def brent( x_k, s_k, sess, tf_in, tf_out ):
     def f( y_k, x_k, s_k, sess, tf_inp, tf_out ):
@@ -93,6 +93,7 @@ def wolf_attack_step( gurobi_model, gurobi_xs, x_k, tf_grad, tf_input, sess ):
     return s_k
 
 def cut_plane( neg_ex, cut_model ):
+
     W, b = cut_model.fit_plane( cut_model.data, neg_ex )
 
     # Update dataset
@@ -383,7 +384,22 @@ class CutModel:
             if assertOnEq:
                 assert False
         self.W = np.concatenate( ( self.W, line.reshape( 1, -1 ) ) )
- 
+    
+    def denorm_W( self, project, means, stds ):
+        assert np.all( ( self.nub[ 0 ] - self.nlb[ 0 ] )[ project == 0 ] < 1e-3 )
+        o = ( self.nub[ 0 ] + self.nlb[ 0 ] ) / 2.0 
+        idx = np.where( project == 0 )[ 0 ].tolist() + [ self.input_size ]
+        o = np.concatenate( ( o, np.ones( 1 ) ) )
+        consts = np.matmul( self.W[:, idx],  o[ idx ] )
+        idx = np.where( project == 1 )[ 0 ]
+        W = self.W[ : , idx ] / stds[ idx ]
+        consts -= np.matmul( self.W[ : , idx ], means[ idx ] / stds[ idx ] )
+        consts = consts[ :, np.newaxis ]
+        W = np.concatenate( ( W, consts ), axis=1 )
+        lb = self.model_nlb[ idx ] * stds[ idx ] + means[ idx ]
+        ub = self.model_nub[ idx ] * stds[ idx ] + means[ idx ]
+        return W, lb, ub
+
     @staticmethod
     def load( name, sess, tf_input, tf_output, y_true ): 
         npdata = np.load( name + '/npdata.npz', allow_pickle=True )
@@ -526,7 +542,6 @@ class CutModel:
     def overapprox_box( self ):
         if not self.obox is None:
             return self.obox
-        
         t = time.time()
         if self.approx_obox:
             lb = []
@@ -820,6 +835,7 @@ class CutModel:
         rand_dir = np.random.normal( 0, 1, size=( int( num_samples / 10.0 ), self.input_size ) ) 
         rand_dir *= ( ub - lb )
         samples_final = []
+
         for coef in np.arange( 0, 1.1, 0.1 ):
             x_k = pt * coef + attack * ( 1 - coef )
             samples = self.sample_gaussian_around_attack( x_k, rand_dir, prints=False )
@@ -842,19 +858,21 @@ class CutModel:
             sense = GRB.LESS_EQUAL
         return ( W, b ), sense
 
-    def lp_sampling( self, nn, attack, num_samples_est, num_samples, ver_type, target, attack_class ):
+    def lp_sampling( self, nn, attack, num_samples_est, num_samples, ver_type, target, attack_class, bound ):
         #lp_ver = LP_verifier( attack, self.model, self.xs, nn, self.nlb, self.nub, ver_type )
         if not ver_type == 'DeepPoly':
             in_attack = attack[ : self.input_size ]
         else:
             in_attack = attack[1]
         #x0 = lp_ver.get_x0( x0, target, attack_class )
-
         def filter( samples ):
             if ver_type == 'DeepPoly':
-                idx = np.matmul( samples, attack[ 0 ][ 0 ] ) +  attack[ 0 ][ 1 ] < 0
+                idx = np.matmul( samples, attack[ 0 ][ 0 ] ) +  attack[ 0 ][ 1 ] 
+                idx = -idx > -bound * 0.98 
                 return samples[ idx ]
-            return self.tf_lp_sampling( attack, samples, ver_type )
+            samples, scores = self.tf_lp_sampling( attack, samples, ver_type )
+            return samples[ np.where( -scores > -bound * 0.9 )[ 0 ] ] 
+
         return self.sampling_around_negative_example( in_attack, filter, num_samples_est, num_samples )
 
     def wolf_sampling( self, attack, num_samples_est, num_samples ):
@@ -943,6 +961,7 @@ class CutModel:
                 bad_exam = None
                 bad_class = None
                 j = 0
+
                 for i in range(output_size):
                     if i == target:
                         continue
@@ -1016,7 +1035,7 @@ class CutModel:
             use_deeppoly = True
         else:
             use_deeppoly = False
-        
+
         mean = 0.0
         std = 0.0
         net = open(net_file,'r')
@@ -1151,6 +1170,7 @@ class CutModel:
         if 'ReLU' in last_layer:
             tf_nlb = tf_nlb[ : -1 ]
             tf_nub = tf_nub[ : -1 ]
+
         self.tf_nlb = tf_nlb
         self.tf_nub = tf_nub
         self.tf_attack = tf_attack
@@ -1398,15 +1418,15 @@ class CutModel:
     def extract_deeppoly_backsub( self, target, batch_size=50 ):
         feed_dict = {}
         ncpus = os.sysconf("SC_NPROCESSORS_ONLN")
-        
+
         for i in range( len( self.tf_nlb ) + 1 ):
             is_final_layer = ( i == len( self.tf_nlb ) )
             s = time.time()
             if i != 0:
                 feed_dict[ self.tf_nlb[ i - 1 ] ] = self.nlb[ i ]
                 feed_dict[ self.tf_nub[ i - 1 ] ] = self.nub[ i ]
-
-            size = self.backsubstitute_tens[ i + 1 ][ 0 ].shape.as_list()[ 1 : ]
+            
+            size = self.backsubstitute_tens[ i + 1 ][ 0 ].shape.as_list()[ 1 : ] 
             layer_size_full = np.prod( size )
             if is_final_layer:
                 recompute_idx = [ j for j in range( layer_size_full ) if j != target ]
@@ -1415,10 +1435,8 @@ class CutModel:
             layer_size = len( recompute_idx )
             if layer_size == 0:
                 continue
-            
             feed_dict[ self.backsubstitute_tens[ i + 1 ][ 2 ] ] = np.zeros( ( batch_size, 1 ) )
             feed_dict[ self.backsubstitute_tens[ i + 1 ][ 3 ] ] = np.zeros( ( batch_size, 1 ) )
-
             lb_layer = []
             ub_layer = []
             out = [ np.zeros( ( 0, self.input_size ) ),  np.zeros( ( 0, self.input_size ) ), np.zeros( ( 0, 1 ) ), np.zeros( ( 0, 1 ) ) ]
@@ -1501,21 +1519,25 @@ class CutModel:
             feed_dict[ self.tf_nub[ i ] ] = self.nub[ i + 1 ]
         out = self.sess.run( self.tf_sampling_layers, feed_dict=feed_dict )
         attack = np.concatenate( [ sample_batch ] + out, axis=1 )
-        is_attack = np.logical_not( np.argmax( out[ -1 ], axis=1 ) == self.y_tar )
-        return is_attack, attack
+        return attack, out[ -1 ][ :, self.y_tar ] - np.max( out[ -1 ], axis=1 )
 
     def tf_lp_sampling( self, attack, samples, vertype, batch_size=50 ):
         ts = []
+        scores = []
+        i = -1
         for i in range( int( samples.shape[ 0 ] / batch_size ) ):
             t = samples[ i * batch_size : ( i + 1 ) * batch_size ]
-            which,_ = self.calc_tf_sampling_net( attack, t )
-            ts.append( t[ which ] )
+            _, score = self.calc_tf_sampling_net( attack, t )
+            ts.append( t )
+            scores.append( score )
         i = i + 1
         t = samples[ i * batch_size : ]
-        which,_ = self.calc_tf_sampling_net( attack, t )
-        ts.append( t[ which ] )
+        _, score = self.calc_tf_sampling_net( attack, t )
+        ts.append( t )
+        scores.append( score )
         ts = np.concatenate( ts, axis=0 )
-        return ts
+        scores = np.concatenate( scores, axis=0 )
+        return ts, scores
 
     def shrink_poly( self, nn, ver_type, target ):
         min_bound = 1.0 / ( 2**7 )
@@ -1577,7 +1599,7 @@ class CutModel:
                 var_new = model.getVarByName( var.VarName )
                 var_id = int( var.VarName[ 1 : ] )
                 coef = self.model.getCoeff( constr, var )
-                dist += coef * center[ var_id ] 
+                dist += coef * center[ var_id ]
                 constr_new += coef * var_new
                 coefs.append( coef )
             dist -= constr.RHS
@@ -1585,7 +1607,6 @@ class CutModel:
             norm = np.linalg.norm( coefs )
             coefs = np.array( coefs ) / norm
             dist /= norm
-            
             i = 0
             for var in self.model.getVars():
                 var_new = model.getVarByName( var.VarName )
@@ -1660,11 +1681,11 @@ class CutModel:
         #ones_C = ones / db_size
         #class_weight = { 0: zeros_C, 1: ones_C }
         #clf = LinearSVC( tol=5e-5, class_weight=class_weight, C=10, max_iter=2000 )
-        clf = LogisticRegression( class_weight='balanced', max_iter=2000 )
+        clf = SGDClassifier( loss='perceptron', class_weight='balanced', max_iter=2000 )
         sample_weights = np.zeros( y.shape )
-        sample_weights[ y == 0 ] = 100
-        sample_weights[ y == 1 ] = 1
-        clf.fit( X, y, sample_weights )
+        sample_weights[ y == 0 ] = 1
+        sample_weights[ y == 1 ] = 2
+        clf.fit( X, y, sample_weight=sample_weights )
 
         W = clf.coef_
         b = clf.intercept_

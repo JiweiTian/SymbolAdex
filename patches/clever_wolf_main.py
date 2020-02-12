@@ -7,20 +7,21 @@ from multiprocessing import Process, Pipe
 import numpy as np
 import argparse
 import csv
+import matplotlib.pyplot as plt
 
 parser = argparse.ArgumentParser(description='ERAN Example',  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument('--netname', type=str, default=None, help='the network name, the extension can be only .pyt, .tf and .meta')
 parser.add_argument('--domain', type=str, default='DeepPoly',choices=['LP', 'DeepPoly'], help='Domain to use in verification')
 parser.add_argument('--dataset', type=str, default=None, help='the dataset, can be either mnist, cifar10, or acasxu')
 parser.add_argument('--image_number', type=int, default=None, help='Whether to test a specific image.' )
-parser.add_argument('--epsilon', type=float, default=0, help='the epsilon for L_infinity perturbation' )
+parser.add_argument('--epsilon', type=float, default=0, help='the epsilon for L_infinity perturbation')
 parser.add_argument('--seed', type=int, default=None, help='Random seed for adex generation.' )
 parser.add_argument('--model', type=str, default=None, help='Which model to load, if no model is specified a new one is trained.' )
 parser.add_argument('--choose_criterea_every', type=int, default=10, help='How often to choose wheher to use LP or Wolfe' )
 parser.add_argument('--max_cuts', type=int, default=50, help='Maximum number of cuts before shrinking' )
 parser.add_argument('--save_every', type=int, default=10, help='How often to save model' )
-parser.add_argument('--nowolf', action='store_true', help='Do not use Frank-Wolfe')
 parser.add_argument('--obox_approx', action='store_true', help='Do not calculate full overapprox_box')
+parser.add_argument('--visualize', action='store_true', help='2d visualisation' )
 
 args = parser.parse_args()
 
@@ -302,13 +303,17 @@ def create_tf_model( netname, dataset, im, model_name ):
     tf_out = tf.get_default_graph().get_tensor_by_name( model.name )
     tf_in = tf.get_default_graph().get_tensor_by_name( 'x:0' )
     print( 'Tensors created' )
-
-    out = sess.run( tf_out, feed_dict={ tf_in: im_copy } )
+    
+    if dataset == 'mortgage':
+        out = 1
+    else:
+        out = sess.run( tf_out, feed_dict={ tf_in: im_copy } )
+        out = np.argmax( out )
     print( 'Tf out computed' )
     if model_name is None:
-        cut_model = CutModel( sess, tf_in, tf_out, np.argmax( out ), pixel_size )
+        cut_model = CutModel( sess, tf_in, tf_out, out, pixel_size )
     else:
-        cut_model = CutModel.load( model_name, sess, tf_in, tf_out, np.argmax( out ) )
+        cut_model = CutModel.load( model_name, sess, tf_in, tf_out, out )
     print( 'Cut model created' )
     return cut_model, is_conv, means, stds, im_copy, pgd_means, pgd_stds, layers
 
@@ -319,7 +324,7 @@ def generate_initial_region_PGD( y_tar, num_samples ):
         examples += filter( lambda x: not x is None, arr )
     examples = np.array( examples )
     print( examples.shape[ 0 ], '/', num_samples )
-    
+   
     if examples.shape[ 0 ] == 0:
         lb = None
         ub = None
@@ -403,7 +408,7 @@ def wolf_cut( cut_model, hist, num_samples, sample_poly=True ):
         bad_idx, hyper = cut_plane( np.concatenate( ( neg_ex, *hist.cut_hist ) ), cut_model )
         bad_idx = bad_idx[ bad_idx < neg_ex.shape[ 0 ] ]
         if bad_idx.shape[ 0 ] < neg_ex.shape[ 0 ]:
-            res = hyper
+            res = ( hyper, neg_ex )
             cut_model.add_hyperplane( *hyper )
             add_hyperplane_pool( hyper )
             if hist.update_history( neg_ex ):
@@ -416,7 +421,7 @@ def wolf_cut( cut_model, hist, num_samples, sample_poly=True ):
             bad_idx, hyper = cut_plane( np.concatenate( ( neg_ex, *hist.cut_hist ) ), cut_model )
             bad_idx = bad_idx[ bad_idx < neg_ex.shape[ 0 ] ]
             if bad_idx.shape[ 0 ] < neg_ex.shape[ 0 ]:
-                res = hyper
+                res = ( hyper, neg_ex )
                 cut_model.add_hyperplane( *hyper )
                 add_hyperplane_pool( hyper )
                 if hist.update_history( neg_ex ):
@@ -430,12 +435,11 @@ def lp_cut( cut_model, hist, nn, domain, y_tar, lp_ver_output=None, complete=Fal
     else:
         output = lp_ver_output
     if isinstance( output, bool ):
-        return True, None
+        return True, None, None, None
 
     if domain == 'DeepPoly':
         eq, example, attack_class, bound = output
         print( 'Network output:', cut_model.eval_network( example ), 'LP output:', bound )
-        example = ( eq, example )
     else:
         example, attack_class, bound = output
         in_example = example[ 0 : cut_model.input_size ]
@@ -449,30 +453,60 @@ def lp_cut( cut_model, hist, nn, domain, y_tar, lp_ver_output=None, complete=Fal
     #    new_data_idx = np.logical_not( new_data_idx )
     #cut_model.set_data( cut_model.data[ new_data_idx ] )
     st = time.time()
-    samples = cut_model.lp_sampling( nn, example, 200, 5000, domain, y_tar, attack_class )
+    if domain == 'DeepPoly':
+        samples = cut_model.lp_sampling( nn, ( eq, example ), 200, 5000, domain, y_tar, attack_class, bound )
+    else:
+        samples = cut_model.lp_sampling( nn, example, 200, 5000, domain, y_tar, attack_class, bound )
     dur = time.time() - st 
     print( 'Sampling:', dur, 'sec' )
     print( 'Verification cut',  samples.shape[ 0 ], '/', 5000 )
 
+    if domain == 'DeepPoly':
+        idx = np.where( -( np.matmul( cut_model.data, eq[0] ) ) < -( bound - eq[1] ) * 0.98 )[ 0 ]
+        all_data = cut_model.data
+        if idx.shape[ 0 ] < cut_model.data.shape[ 0 ] * 0.1:
+            size = cut_model.data.shape[ 0 ] * 0.1
+            size = int( size )
+            idx = np.argsort( -np.matmul( cut_model.data, eq[0] ) )[ : size ]
+        cut_model.data = cut_model.data[ idx ] 
+        center = cut_model.furthest_point( example ) 
+    else:
+        data, scores = cut_model.tf_lp_sampling( example, cut_model.data, 'LP' )
+        all_data = cut_model.data
+        idx = np.where( -scores < -bound * 0.9 )[ 0 ]
+        if idx.shape[ 0 ] < cut_model.data.shape[ 0 ] * 0.1:
+            size = cut_model.data.shape[ 0 ] * 0.1
+            size = int( size )
+            idx = np.argsort( -scores )[ : size ]
+        cut_model.data = cut_model.data[ -scores < -bound * 0.9 ]
+        center = cut_model.furthest_point( in_example ) 
+
     bad_idx, hyper = cut_plane( np.concatenate( ( samples, *hist.cut_hist ) ), cut_model )
     bad_idx = bad_idx[ bad_idx < samples.shape[ 0 ] ]
-    
+   
+    # Update dataset
+    W, b = hyper
+    y_pred = np.matmul( W, all_data.T ) + b > 0
+    y_pred = y_pred.reshape( -1 )
+    new_data = all_data[ y_pred, : ]
+    cut_model.set_data( new_data )
+
     if bad_idx.shape[ 0 ] < samples.shape[ 0 ]:
         cut_model.add_hyperplane( *hyper )
         add_hyperplane_pool( hyper )
         if hist.update_history( samples ):
             print( [ hst.shape for hst in hist.cut_hist ] )
 
-    return False, hyper
+    return False, hyper, samples, center
 
 def choose_method( cut_model, hist, lp_params, wolf_params ):
+    return 'LP'
     print( '\nStart choose method\n' )
     output = cut_model.lp_verification( *lp_params )
     
     if isinstance( output, bool ):
         return None
-
-    bound = output[-1]
+    _, _, bound = output
 
     model_wolf = cut_model.copy()
     hist_wolf = hist.copy()
@@ -487,29 +521,21 @@ def choose_method( cut_model, hist, lp_params, wolf_params ):
     model_lp = cut_model.copy()
     hist_lp = hist.copy()
 
-    if len( output ) == 4:
-        model_lp.set_precision( output[ 1 ] )
-    else:
-        model_lp.set_precision( output[ 0 ][ : cut_model.input_size ] )
+    model_lp.set_precision( output[ 0 ][ : cut_model.input_size ] )
     precision = model_lp.precision
 
     start = time.time()
-    _, hyper_lp = lp_cut( model_lp, hist_lp, *lp_params, lp_ver_output=output )
+    _, hyper_lp, _, _ = lp_cut( model_lp, hist_lp, *lp_params, lp_ver_output=output )
     time_lp_sampl = time.time() - start
 
     output_wolf = model_wolf.lp_verification( *lp_params )
     cut_model.add_hyperplane( *hyper_wolf )
     add_hyperplane_pool( hyper_wolf )
-    if isinstance( output_wolf, bool ):
+    if isinstance( output, bool ):
         del model_lp, model_wolf
         return None
-    
-    if len( output ) == 4:
-        in_example_wolf = output_wolf[ 1 ]
-        bound_wolf = output_wolf[ -1 ]
-    else:
-        example_wolf, _, bound_wolf = output_wolf
-        in_example_wolf = example_wolf[ 0 : cut_model.input_size ]
+    example_wolf, _, bound_wolf = output_wolf
+    in_example_wolf = example_wolf[ 0 : cut_model.input_size ]
 
     start = time.time()
     output_lp = model_lp.lp_verification( *lp_params )
@@ -517,15 +543,11 @@ def choose_method( cut_model, hist, lp_params, wolf_params ):
     time_lp = time_ver + time_lp_sampl
     cut_model.add_hyperplane( *hyper_lp )
     add_hyperplane_pool( hyper_lp )
-    if isinstance( output_lp, bool ):
+    if isinstance( output, bool ):
         del model_lp, model_wolf
         return None
-    if len( output ) == 4:
-        in_example_lp = output_lp[ 1 ]
-        bound_lp = output_lp[ -1 ]
-    else:
-        example_lp, _, bound_lp = output_lp
-        in_example_lp = example_lp[ 0 : cut_model.input_size ]
+    example_lp, _, bound_lp = output_lp
+    in_example_lp = example_lp[ 0 : cut_model.input_size ]
 
     del model_lp, model_wolf
 
@@ -542,6 +564,66 @@ def choose_method( cut_model, hist, lp_params, wolf_params ):
     if ( dwolf / time_wolf ) > ( dlp / time_lp ):
         return 'Wolf'
     return 'LP'
+
+def draw2d_region( W, lb, ub, name, bounds, pos_ex=None, neg_ex=None, center=None, draw_hp=-1 ):
+    lbs = np.concatenate( ( -np.eye( lb.shape[ 0 ] ), lb[:,np.newaxis] ), axis=1 ) 
+    ubs = np.concatenate( ( np.eye( ub.shape[ 0 ] ), -ub[:,np.newaxis] ), axis=1 )
+    W_full = np.concatenate( ( lbs, ubs ), axis=0 )
+    W_full = np.concatenate( ( W_full, W ), axis=0 )
+    verts = []
+    for i in range( W_full.shape[0]):
+        for j in range( i + 1, W_full.shape[0]):
+            if j == i + lbs.shape[0] and i < lbs.shape[0]:
+                continue
+            idx = np.array( [i,j] )
+            x = np.linalg.solve( W_full[idx, :-1], -W_full[idx, -1] )
+            m = np.matmul( W_full, x.tolist() + [1] )
+            if np.any( m > 1e-6 ):
+                continue
+            print( i ,j , m, x )
+            verts.append( x )
+    verts = np.array( verts )
+    import matplotlib.pyplot as plt
+    from scipy.spatial import ConvexHull, convex_hull_plot_2d
+    try:
+        hull = ConvexHull(verts)
+        hs = hull.simplices
+        vol = hull.volume
+    except:
+
+        dist_0 = np.max( verts[ :, 0 ] - np.average( verts[ :, 0 ] ) ) 
+        dist_1 = np.max( verts[ :, 1 ] - np.average( verts[ :, 1 ] ) ) 
+        if dist_0 < dist_1:
+            hs = []
+            hs.append( ( np.argmin( verts[ :, 1 ] ), np.argmax( verts[ :, 1 ] ) ) )
+        else:
+            hs = []
+            hs.append( ( np.argmin( verts[ :, 0 ] ), np.argmax( verts[ :, 0 ] ) ) )
+        vol = 0
+    plt.figure()
+    plt.plot(verts[:,0], verts[:,1], 'ko')
+    if not pos_ex is None:
+        plt.plot(pos_ex[:, 0], pos_ex[:,1], 'g+')
+    if not neg_ex is None:
+        plt.plot(neg_ex[:, 0], neg_ex[:,1], color='red', marker='$-$', linestyle=' ')
+    if not center is None:
+        plt.plot(center[0], center[1], 'bx', markersize=12)
+    axes = plt.gca()
+    bounds_lb, bounds_ub = bounds
+    margin = ( np.array( bounds_ub ) - bounds_lb ) / 20.0
+    axes.set_xlim([ bounds_lb[ 0 ] - margin[ 0 ], bounds_ub[ 0 ] + margin[ 0 ] ])
+    axes.set_ylim([ bounds_lb[ 1 ] - margin[ 1 ], bounds_ub[ 1 ] + margin[ 1 ] ])
+    for simplex in hs:
+        plt.plot(verts[simplex, 0], verts[simplex, 1], 'k-')
+    if draw_hp > -1:
+        l = W[ draw_hp, : ]
+        y_min = ( l[ 0 ] * ( bounds_lb[ 0 ] - margin[ 0 ] ) + l[ 2 ] ) / -l[ 1 ]
+        y_max = ( l[ 0 ] * ( bounds_ub[ 0 ] + margin[ 0 ] ) + l[ 2 ] ) / -l[ 1 ]
+        plt.plot([bounds_lb[ 0 ] - margin[ 0 ], bounds_ub[ 0 ] + margin[ 0 ]], [y_min,y_max], 'y--')
+    plt.show()
+    plt.title( 'Volume:' + str(vol) )
+    plt.savefig( name )
+    plt.close()
 
 class History:
     def __init__( self, input_size, cut_hist_size=5, update_hist_every=10 ):
@@ -578,31 +660,28 @@ class History:
 def clever_wolf( nn, cut_model, y_true, y_tar, specLB, specUB, domain, args ):
     clever_start_time = time.time()
     if cut_model.y_tar == None:
-        data, lb, ub = generate_initial_region_PGD( y_tar, 250 )
+        '''data, lb, ub = generate_initial_region_PGD( y_tar, 250 )
         reset_pool( ( specLB, specUB ) )                                                                                                                                
         update_target_pool( ( y_true, y_tar ) )                                                                                                                         
         cut_model.update_target( y_true, y_tar )
         cut_model.reset_model( specLB, specUB )
-        succ_attacks = data.shape[ 0 ]
-        all_attacks = 250
-        if not args.nowolf:
-            samples = cut_model.sample_poly_under( 250 )                                                                                                                   
-            pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
-            succ_attacks += pos_ex.shape[ 0 ]
-            all_attacks += 250
-        print( 'Target', y_tar, succ_attacks, '/', all_attacks )
-        if succ_attacks > 0:
+        samples = cut_model.sample_poly_under( 250 )                                                                                                                   
+        pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
+        print( 'Target', y_tar, data.shape[ 0 ] + pos_ex.shape[ 0 ], '/', 500 )'''
+        #print( 'Target', y_tar, data.shape[ 0 ], '/', 500 )
+        #if data.shape[ 0 ] + pos_ex.shape[ 0 ] > 0:
+        #if data.shape[ 0 ] > 0:
+        if True:
             data, lb, ub = generate_initial_region_PGD( y_tar, 5000 )
             reset_pool( ( specLB, specUB ) )
             update_target_pool( ( y_true, y_tar ) )
             cut_model.update_target( y_true, y_tar )
             cut_model.reset_model( specLB, specUB )
-            
-            if not args.nowolf:
-                samples = cut_model.sample_poly_under( 5000 )
-                pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
-                if not pos_ex.shape[ 0 ] == 0:
-                    data = np.concatenate( ( data, pos_ex ) ) 
+
+            samples = cut_model.sample_poly_under( 5000 )
+            pos_ex = sample_wolf_attacks( samples, 'pos_brent' )
+            if not pos_ex.shape[ 0 ] == 0:
+                data = np.concatenate( ( data, pos_ex ) ) 
             lb = np.min( data, axis=0 )
             ub = np.max( data, axis=0 )
 
@@ -630,17 +709,32 @@ def clever_wolf( nn, cut_model, y_true, y_tar, specLB, specUB, domain, args ):
             print( 'Verified, time:', int( time.time() - clever_start_time ) )
             return True   
     print( 'Init model' )
-    if args.obox_approx:
+    if args.approx_obox:
         cut_model.approx_obox = True
     process = psutil.Process(os.getpid())
-    start_lp_sampling = args.nowolf
+    start_lp_sampling = False
+    #start_lp_sampling = True
     method = None
     res = None
-    hist = History( cut_model.input_size, cut_hist_size=5, update_hist_every=2 ) 
+    hist = History( cut_model.input_size, cut_hist_size=0, update_hist_every=1 ) 
     lp_params = ( nn, domain, y_tar )
     wolf_params = [ 1000 ]
     for cut in range( args.max_cuts ):
-
+        
+        if args.visualize:
+            project = np.array( [ False ] * cut_model.input_size )
+            project[ bounds_keys ] = True
+            W, lb, ub = cut_model.denorm_W( project, means, stds )
+            if cut == 0:
+                center = None
+                pos_ex = None
+                neg_ex = None
+            else:
+                center = center[ bounds_keys ]  * stds[ bounds_keys ] + means[ bounds_keys ]
+                pos_ex = cut_model.data[ :, bounds_keys ] * stds[ bounds_keys ] + means[ bounds_keys ]
+                neg_ex = samples[ :, bounds_keys ] * stds[ bounds_keys ] + means[ bounds_keys ]
+            draw2d_region( W, lb, ub, model_name + '/reg' + str(cut) + '.png', ( bounds_lb, bounds_ub ), center=center, pos_ex=pos_ex, neg_ex=neg_ex, draw_hp=W.shape[0] - 1 )
+        
         sys.stdout.flush()
 
         print_vol( cut_model )
@@ -661,11 +755,13 @@ def clever_wolf( nn, cut_model, y_true, y_tar, specLB, specUB, domain, args ):
 
         if not start_lp_sampling and method == 'Wolf':
             res = wolf_cut( cut_model, hist, *wolf_params )
+            if not res == False:
+                hyper, samples = res
 
         if start_lp_sampling or res == False or method == 'LP':
             if not start_lp_sampling and not method == 'LP':
                 start_lp_sampling = start_lp_sampling or res == False
-            verified, _ = lp_cut( cut_model, hist, *lp_params )
+            verified, hyper, samples, center = lp_cut( cut_model, hist, *lp_params )
             
             if verified:
                 cut_model.save( model_name )
@@ -687,7 +783,7 @@ def destroy_pool():
 
 
 if(dataset=='mnist'):
-    csvfile = open('../data/mnist_test.csv', 'r')
+    csvfile = open('../data/mnist_test_full.csv', 'r')
     tests = csv.reader(csvfile, delimiter=',')
 elif(dataset=='cifar10'):
     csvfile = open('../data/cifar10_test.csv', 'r')
@@ -719,12 +815,26 @@ elif(dataset=='cifar10'):
 img = np.copy(image)
 
 if dataset=='mortgage':
-    feat_bounds = { 0: (0, 10), 5: (0, 200), 8: (1, 64), 9:(300, 850) }
+    import json
+    f = open( '../data/mortgage/spec' + str( args.image_number ) + '.txt', 'r' ) 
+    x = f.readlines()[ 0 ]
+    x = '{' + x + '}'
+    feat_bounds = json.loads(x)
+    feat_bounds = { int(k): feat_bounds[k] for k in feat_bounds }
+    spread = np.array( list( feat_bounds.values() ) )
+    spread = spread[ : , 1 ] - spread[ : , 0 ]
+    margin = 0.05 * spread
+    spread = 1.05 * spread
+    l = 0
+    for k in feat_bounds:
+        feat_bounds[k] = ( feat_bounds[ k ][ 0 ] - margin[ l ], feat_bounds[ k ][ 1 ] + margin[ l ] )
+        l += 1
+    print( feat_bounds )
     bounds_lb = [ feat_bounds[ key ][ 0 ] for key in feat_bounds ]
     bounds_ub = [ feat_bounds[ key ][ 1 ] for key in feat_bounds ]
     bounds_keys = list( feat_bounds.keys() )
     e = np.zeros( image.shape, dtype=np.float32 )
-    e[ bounds_keys ] = epsilon
+    e[ bounds_keys ] = spread
     clip_max = image.copy() 
     clip_max[ bounds_keys ] = bounds_ub
     clip_max += 1e-6
@@ -736,7 +846,7 @@ else:
     clip_max = np.array( [1.0 + 1e-6] * img.shape[ 0 ] ) # Fix clever hans num instabilities
     clip_min = np.array( [-1e-6] * img.shape[ 0 ] ) # Fix clever hans num instabilities
 
-conns, procs = create_pool( seed, netname, dataset, img, e, clip_min, clip_max, args.model ) 
+conns, procs = create_pool( seed, netname, dataset, clip_max, e, clip_min, clip_max, args.model ) 
 cut_model, is_conv, means, stds, img, _, _, layers = create_tf_model( netname, dataset, img, args.model )
 
 import atexit
@@ -780,6 +890,7 @@ eran = ERAN(cut_model.tf_output, is_onnx=False)
 imgLB = np.copy( img )
 imgUB = np.copy( img )
 label,nn,nlb,nub = eran.analyze_box(imgLB, imgUB, 'deepzono', 1, 1, True)
+ 
 assert label == cut_model.y_true
 
 # Create specLB/UB
@@ -789,8 +900,8 @@ if dataset=='mnist':
 elif dataset=='mortgage':
     specLB = image.copy()
     specUB = image.copy()
-    specLB[ bounds_keys ] = np.clip( image[ bounds_keys ] - epsilon, bounds_lb, bounds_ub )
-    specUB[ bounds_keys ] = np.clip( image[ bounds_keys ] + epsilon, bounds_lb, bounds_ub )
+    specLB[ bounds_keys ] = bounds_lb
+    specUB[ bounds_keys ] = bounds_ub
 elif dataset=='cifar10':
     if(is_trained_with_pytorch):
         specLB = np.clip(image - epsilon,0,1)
@@ -802,12 +913,12 @@ if is_trained_with_pytorch:
     normalize( specLB, means, stds, is_conv )
     normalize( specUB, means, stds, is_conv )
 
-if not corr_label == label:
-    print('Bad classification.')
-    exit()
+#import pdb;pdb.set_trace()
+#if not corr_label == label:
+#    print('Bad classification.')
+#    exit()
 
 classes = cut_model.tf_output.shape.as_list()[1]
-
 for i in range( classes ):
     if i == label:
         continue
@@ -815,8 +926,9 @@ for i in range( classes ):
         if not i == cut_model.y_tar:
             continue
     try:
-        model_name = os.path.basename( filename ) + '_' + str( args.image_number ) + '_class_' + str( i )
-        clever_wolf( nn, cut_model, corr_label, i, specLB, specUB, domain, args )
+        model_name = os.path.basename( filename ) + '_' + str( args.image_number ) + '_class_' + str( i ) + '_seed_' + str( args.seed )
+        os.mkdir( model_name )
+        clever_wolf( nn, cut_model, label, i, specLB, specUB, domain, args )
         if args.model is None:
             cut_model.y_tar = None
     except Exception as e:
