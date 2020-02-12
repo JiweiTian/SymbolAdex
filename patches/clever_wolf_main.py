@@ -687,7 +687,7 @@ def destroy_pool():
 
 
 if(dataset=='mnist'):
-    csvfile = open('../data/mnist_test_full.csv', 'r')
+    csvfile = open('../data/mnist_test.csv', 'r')
     tests = csv.reader(csvfile, delimiter=',')
 elif(dataset=='cifar10'):
     csvfile = open('../data/cifar10_test.csv', 'r')
