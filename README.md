@@ -30,5 +30,8 @@ The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_veri
 
 To execute mortgage dataset experiments:
 ```
+git clone https://github.com/dimy93/SymbolAdex.git
+cd SymbolAdex
 git checkout mortgage
+./install.sh
 ```
