@@ -26,3 +26,9 @@ To run the MNIST 9x200 experiments call the ***run\_mnist\_ffn.sh*** script as f
 cd ERAN/tf_verify/
 ./run_mnist_ffn.sh
 ```
+The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_it\_Iteration***.
+
+To execute mortgage dataset experiments:
+```
+git checkout mortgage
+```
