@@ -51,4 +51,6 @@ To run the mortgage dataset experiments that use the DeepPoly convex relaxation 
 cd ERAN/tf_verify/
 ./mortgage_deeppoly.sh
 ```
-The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/NetworkName\_ImgNum\_class\_AdvClass\_it\_Iteration***.
+Visualisation of the resuls will appear in ***./ERAN/tf\_verify/mortgage\_ImgNum\_class\_0\_seed\_Seed***.
+
+The resulting symbolic adversarial examples will appear under ***./ERAN/tf\_verify/mortgage\_ImgNum\_class\_0\_seed\_Seed\_it\_Iteration***.
