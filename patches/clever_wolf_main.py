@@ -709,7 +709,7 @@ def clever_wolf( nn, cut_model, y_true, y_tar, specLB, specUB, domain, args ):
             print( 'Verified, time:', int( time.time() - clever_start_time ) )
             return True   
     print( 'Init model' )
-    if args.approx_obox:
+    if args.obox_approx:
         cut_model.approx_obox = True
     process = psutil.Process(os.getpid())
     start_lp_sampling = False
